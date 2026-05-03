@@ -17,16 +17,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/config"
 )
 
 const (
 	updateCacheKey = "update_check_cache"
 	updateCacheTTL = 1200 // 20 minutes
-	githubRepo     = "Wei-Shaw/sub2api"
-
-	// Security: allowed download domains for updates
-	allowedDownloadHost = "github.com"
-	allowedAssetHost    = "objects.githubusercontent.com"
 
 	// Security: max download size (500MB)
 	maxDownloadSize = 500 * 1024 * 1024
@@ -40,7 +37,7 @@ type UpdateCache interface {
 
 // GitHubReleaseClient 获取 GitHub release 信息的接口
 type GitHubReleaseClient interface {
-	FetchLatestRelease(ctx context.Context, repo string) (*GitHubRelease, error)
+	FetchLatestRelease(ctx context.Context, apiBaseURL, repo string) (*GitHubRelease, error)
 	DownloadFile(ctx context.Context, url, dest string, maxSize int64) error
 	FetchChecksumFile(ctx context.Context, url string) ([]byte, error)
 }
@@ -51,27 +48,37 @@ type UpdateService struct {
 	githubClient   GitHubReleaseClient
 	currentVersion string
 	buildType      string // "source" for manual builds, "release" for CI builds
+	updateSource   config.UpdateSourceConfig
 }
 
 // NewUpdateService creates a new UpdateService
-func NewUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, version, buildType string) *UpdateService {
+func NewUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, version, buildType string, updateConfig config.UpdateConfig) *UpdateService {
+	updateSource := normalizeUpdateSource(updateConfig.Source)
 	return &UpdateService{
 		cache:          cache,
 		githubClient:   githubClient,
 		currentVersion: version,
 		buildType:      buildType,
+		updateSource:   updateSource,
 	}
 }
 
 // UpdateInfo contains update information
 type UpdateInfo struct {
-	CurrentVersion string       `json:"current_version"`
-	LatestVersion  string       `json:"latest_version"`
-	HasUpdate      bool         `json:"has_update"`
-	ReleaseInfo    *ReleaseInfo `json:"release_info,omitempty"`
-	Cached         bool         `json:"cached"`
-	Warning        string       `json:"warning,omitempty"`
-	BuildType      string       `json:"build_type"` // "source" or "release"
+	CurrentVersion string            `json:"current_version"`
+	LatestVersion  string            `json:"latest_version"`
+	HasUpdate      bool              `json:"has_update"`
+	ReleaseInfo    *ReleaseInfo      `json:"release_info,omitempty"`
+	Source         *UpdateSourceInfo `json:"source,omitempty"`
+	Cached         bool              `json:"cached"`
+	Warning        string            `json:"warning,omitempty"`
+	BuildType      string            `json:"build_type"` // "source" or "release"
+}
+
+type UpdateSourceInfo struct {
+	Type       string `json:"type"`
+	Repository string `json:"repository"`
+	APIBaseURL string `json:"api_base_url"`
 }
 
 // ReleaseInfo contains GitHub release details
@@ -166,13 +173,16 @@ func (s *UpdateService) PerformUpdate(ctx context.Context) error {
 	if downloadURL == "" {
 		return fmt.Errorf("no compatible release found for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
+	if checksumURL == "" && s.updateSource.ChecksumRequired {
+		return fmt.Errorf("checksum is required but checksums.txt was not found in release assets")
+	}
 
 	// SECURITY: Validate download URL is from trusted domain
-	if err := validateDownloadURL(downloadURL); err != nil {
+	if err := s.validateDownloadURL(downloadURL); err != nil {
 		return fmt.Errorf("invalid download URL: %w", err)
 	}
 	if checksumURL != "" {
-		if err := validateDownloadURL(checksumURL); err != nil {
+		if err := s.validateDownloadURL(checksumURL); err != nil {
 			return fmt.Errorf("invalid checksum URL: %w", err)
 		}
 	}
@@ -274,7 +284,7 @@ func (s *UpdateService) Rollback() error {
 }
 
 func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, error) {
-	release, err := s.githubClient.FetchLatestRelease(ctx, githubRepo)
+	release, err := s.githubClient.FetchLatestRelease(ctx, s.updateSource.APIBaseURL, s.updateSource.Repository)
 	if err != nil {
 		return nil, err
 	}
@@ -303,6 +313,7 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 		},
 		Cached:    false,
 		BuildType: s.buildType,
+		Source:    s.updateSourceInfo(),
 	}, nil
 }
 
@@ -317,8 +328,12 @@ func (s *UpdateService) getArchiveName() string {
 }
 
 // validateDownloadURL checks if the URL is from an allowed domain
-// SECURITY: This prevents SSRF and ensures downloads only come from trusted GitHub domains
-func validateDownloadURL(rawURL string) error {
+// SECURITY: This prevents SSRF and ensures downloads only come from trusted release asset domains.
+func (s *UpdateService) validateDownloadURL(rawURL string) error {
+	return validateDownloadURL(rawURL, s.updateSource.AllowedDownloadHosts)
+}
+
+func validateDownloadURL(rawURL string, allowedHosts []string) error {
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -328,18 +343,32 @@ func validateDownloadURL(rawURL string) error {
 	if parsedURL.Scheme != "https" {
 		return fmt.Errorf("only HTTPS URLs are allowed")
 	}
+	if parsedURL.User != nil {
+		return fmt.Errorf("URL userinfo is not allowed")
+	}
 
 	// Check against allowed hosts
-	host := parsedURL.Host
-	// GitHub release URLs can be from github.com or objects.githubusercontent.com
-	if host != allowedDownloadHost &&
-		!strings.HasSuffix(host, "."+allowedDownloadHost) &&
-		host != allowedAssetHost &&
-		!strings.HasSuffix(host, "."+allowedAssetHost) {
+	host := strings.ToLower(parsedURL.Hostname())
+	if !isAllowedDownloadHost(host, allowedHosts) {
 		return fmt.Errorf("download from untrusted host: %s", host)
 	}
 
 	return nil
+}
+
+func isAllowedDownloadHost(host string, allowedHosts []string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	for _, allowed := range allowedHosts {
+		allowed = strings.ToLower(strings.TrimSpace(allowed))
+		allowed = strings.TrimPrefix(allowed, "*.")
+		if allowed == "" {
+			continue
+		}
+		if host == allowed || strings.HasSuffix(host, "."+allowed) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *UpdateService) verifyChecksum(ctx context.Context, filePath, checksumURL string) error {
@@ -477,8 +506,12 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 		Latest      string       `json:"latest"`
 		ReleaseInfo *ReleaseInfo `json:"release_info"`
 		Timestamp   int64        `json:"timestamp"`
+		SourceID    string       `json:"source_id,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(data), &cached); err != nil {
+		return nil, err
+	}
+	if err := s.validateCachedSource(cached.SourceID); err != nil {
 		return nil, err
 	}
 
@@ -491,6 +524,7 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 		LatestVersion:  cached.Latest,
 		HasUpdate:      compareVersions(s.currentVersion, cached.Latest) < 0,
 		ReleaseInfo:    cached.ReleaseInfo,
+		Source:         s.updateSourceInfo(),
 		Cached:         true,
 		BuildType:      s.buildType,
 	}, nil
@@ -501,14 +535,89 @@ func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 		Latest      string       `json:"latest"`
 		ReleaseInfo *ReleaseInfo `json:"release_info"`
 		Timestamp   int64        `json:"timestamp"`
+		SourceID    string       `json:"source_id"`
 	}{
 		Latest:      info.LatestVersion,
 		ReleaseInfo: info.ReleaseInfo,
 		Timestamp:   time.Now().Unix(),
+		SourceID:    s.updateSourceID(),
 	}
 
 	data, _ := json.Marshal(cacheData)
 	_ = s.cache.SetUpdateInfo(ctx, string(data), time.Duration(updateCacheTTL)*time.Second)
+}
+
+func normalizeUpdateSource(source config.UpdateSourceConfig) config.UpdateSourceConfig {
+	source.Type = strings.ToLower(strings.TrimSpace(source.Type))
+	if source.Type == "" {
+		source.Type = config.UpdateSourceTypeGitHubRelease
+	}
+	source.Repository = strings.Trim(strings.TrimSpace(source.Repository), "/")
+	if source.Repository == "" {
+		source.Repository = config.DefaultUpdateSourceRepository
+	}
+	source.APIBaseURL = strings.TrimRight(strings.TrimSpace(source.APIBaseURL), "/")
+	if source.APIBaseURL == "" {
+		source.APIBaseURL = config.DefaultUpdateSourceAPIBaseURL
+	}
+	source.AllowedDownloadHosts = normalizeUpdateAllowedHosts(source.AllowedDownloadHosts)
+	if len(source.AllowedDownloadHosts) == 0 {
+		source.AllowedDownloadHosts = append([]string(nil), config.DefaultUpdateSourceAllowedDownloadHosts...)
+	}
+	return source
+}
+
+func normalizeUpdateAllowedHosts(hosts []string) []string {
+	if len(hosts) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		trimmed := strings.ToLower(strings.TrimSpace(host))
+		if trimmed != "" {
+			normalized = append(normalized, trimmed)
+		}
+	}
+	return normalized
+}
+
+func (s *UpdateService) updateSourceInfo() *UpdateSourceInfo {
+	return &UpdateSourceInfo{
+		Type:       s.updateSource.Type,
+		Repository: s.updateSource.Repository,
+		APIBaseURL: s.updateSource.APIBaseURL,
+	}
+}
+
+func (s *UpdateService) updateSourceID() string {
+	return updateSourceID(s.updateSource)
+}
+
+func updateSourceID(source config.UpdateSourceConfig) string {
+	source = normalizeUpdateSource(source)
+	return strings.Join([]string{source.Type, source.Repository, source.APIBaseURL}, "|")
+}
+
+func defaultUpdateSourceID() string {
+	return updateSourceID(config.UpdateSourceConfig{
+		Type:       config.UpdateSourceTypeGitHubRelease,
+		Repository: config.DefaultUpdateSourceRepository,
+		APIBaseURL: config.DefaultUpdateSourceAPIBaseURL,
+	})
+}
+
+func (s *UpdateService) validateCachedSource(cachedSourceID string) error {
+	currentSourceID := s.updateSourceID()
+	if cachedSourceID == currentSourceID {
+		return nil
+	}
+	if cachedSourceID == "" && currentSourceID == defaultUpdateSourceID() {
+		return nil
+	}
+	if cachedSourceID == "" {
+		return fmt.Errorf("cache source mismatch: cached source is legacy default, current source is %s", currentSourceID)
+	}
+	return fmt.Errorf("cache source mismatch: cached %s, current %s", cachedSourceID, currentSourceID)
 }
 
 // compareVersions compares two semantic versions

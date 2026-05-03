@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -63,7 +64,9 @@ func NewGitHubReleaseClient(proxyURL string, allowDirectOnProxyError bool) servi
 	}
 }
 
-func (c *githubReleaseClientError) FetchLatestRelease(ctx context.Context, repo string) (*service.GitHubRelease, error) {
+const defaultGitHubAPIBaseURL = "https://api.github.com"
+
+func (c *githubReleaseClientError) FetchLatestRelease(ctx context.Context, apiBaseURL, repo string) (*service.GitHubRelease, error) {
 	return nil, c.err
 }
 
@@ -75,10 +78,13 @@ func (c *githubReleaseClientError) FetchChecksumFile(ctx context.Context, url st
 	return nil, c.err
 }
 
-func (c *githubReleaseClient) FetchLatestRelease(ctx context.Context, repo string) (*service.GitHubRelease, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
+func (c *githubReleaseClient) FetchLatestRelease(ctx context.Context, apiBaseURL, repo string) (*service.GitHubRelease, error) {
+	latestReleaseURL, err := buildLatestReleaseURL(apiBaseURL, repo)
+	if err != nil {
+		return nil, err
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, latestReleaseURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -101,6 +107,23 @@ func (c *githubReleaseClient) FetchLatestRelease(ctx context.Context, repo strin
 	}
 
 	return &release, nil
+}
+
+func buildLatestReleaseURL(apiBaseURL, repo string) (string, error) {
+	apiBaseURL = strings.TrimRight(strings.TrimSpace(apiBaseURL), "/")
+	if apiBaseURL == "" {
+		apiBaseURL = defaultGitHubAPIBaseURL
+	}
+	repo = strings.Trim(strings.TrimSpace(repo), "/")
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", fmt.Errorf("invalid GitHub repository %q: must be owner/repo", repo)
+	}
+	joined, err := url.JoinPath(apiBaseURL, "repos", parts[0], parts[1], "releases", "latest")
+	if err != nil {
+		return "", err
+	}
+	return joined, nil
 }
 
 func (c *githubReleaseClient) DownloadFile(ctx context.Context, url, dest string, maxSize int64) error {

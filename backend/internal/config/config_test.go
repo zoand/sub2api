@@ -211,6 +211,43 @@ func TestLoadIdempotencyConfigFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultUpdateSourceConfig(t *testing.T) {
+	resetViperWithJWTSecret(t)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, UpdateSourceTypeGitHubRelease, cfg.Update.Source.Type)
+	require.Equal(t, DefaultUpdateSourceRepository, cfg.Update.Source.Repository)
+	require.Equal(t, DefaultUpdateSourceAPIBaseURL, cfg.Update.Source.APIBaseURL)
+	require.Equal(t, DefaultUpdateSourceAllowedDownloadHosts, cfg.Update.Source.AllowedDownloadHosts)
+	require.False(t, cfg.Update.Source.ChecksumRequired)
+}
+
+func TestLoadUpdateSourceConfigFromEnv(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("UPDATE_SOURCE_TYPE", "github_release")
+	t.Setenv("UPDATE_SOURCE_REPOSITORY", "zoand/sub2api")
+	t.Setenv("UPDATE_SOURCE_API_BASE_URL", "https://github.example.com/api/v3")
+	t.Setenv("UPDATE_SOURCE_ALLOWED_DOWNLOAD_HOSTS", "github.com, objects.githubusercontent.com, github.example.com")
+	t.Setenv("UPDATE_SOURCE_CHECKSUM_REQUIRED", "true")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, "zoand/sub2api", cfg.Update.Source.Repository)
+	require.Equal(t, "https://github.example.com/api/v3", cfg.Update.Source.APIBaseURL)
+	require.Equal(t, []string{"github.com", "objects.githubusercontent.com", "github.example.com"}, cfg.Update.Source.AllowedDownloadHosts)
+	require.True(t, cfg.Update.Source.ChecksumRequired)
+}
+
+func TestLoadUpdateSourceConfigRejectsInvalidRepository(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("UPDATE_SOURCE_REPOSITORY", "https://github.com/zoand/sub2api")
+
+	_, err := Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "update.source.repository")
+}
+
 func TestLoadSchedulingConfigFromEnv(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	t.Setenv("GATEWAY_SCHEDULING_STICKY_SESSION_MAX_WAITING", "5")

@@ -1059,3 +1059,24 @@ update:
   # Leave empty for direct connection (recommended for overseas servers)
   # 留空表示直连（适用于海外服务器）
   proxy_url: ""
+
+  # Release source for online updates
+  # 在线更新 Release 源配置
+  source:
+    # Currently supported: github_release
+    # 当前支持：github_release
+    type: "github_release"
+    # GitHub repository in owner/repo format
+    # GitHub 仓库，格式为 owner/repo；fork 用户可改为自己的仓库
+    repository: "Wei-Shaw/sub2api"
+    # GitHub API base URL. GitHub Enterprise can use https://host/api/v3
+    # GitHub API 根地址；GitHub Enterprise 可配置为 https://host/api/v3
+    api_base_url: "https://api.github.com"
+    # Trusted release asset download hosts
+    # 可信 release asset 下载域名，支持父域匹配
+    allowed_download_hosts:
+      - "github.com"
+      - "objects.githubusercontent.com"
+    # Require checksums.txt in release assets before applying update
+    # 是否强制 release assets 中必须包含 checksums.txt
+    checksum_required: false

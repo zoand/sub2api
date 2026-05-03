@@ -28,7 +28,7 @@ Demo credentials (shared demo environment; **not** created automatically for sel
 
 | Email | Password |
 |-------|----------|
-| admin@sub2api.org | admin123 |
+| <admin@sub2api.org> | admin123 |
 
 ## Overview
 
@@ -162,6 +162,7 @@ curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install
 ```
 
 The script will:
+
 1. Detect your system architecture
 2. Download the latest release
 3. Install binary to `/opt/sub2api`
@@ -182,6 +183,7 @@ sudo systemctl enable sub2api
 ```
 
 The Setup Wizard will guide you through:
+
 - Database configuration
 - Redis configuration
 - Admin account creation
@@ -191,9 +193,22 @@ The Setup Wizard will guide you through:
 You can upgrade directly from the **Admin Dashboard** by clicking the **Check for Updates** button in the top-left corner.
 
 The web interface will:
+
 - Check for new versions automatically
 - Download and apply updates with one click
 - Support rollback if needed
+
+Fork builds can point online updates to their own GitHub Releases by overriding the update source in `.env`:
+
+```env
+UPDATE_SOURCE_TYPE=github_release
+UPDATE_SOURCE_REPOSITORY=zoand/sub2api
+UPDATE_SOURCE_API_BASE_URL=https://api.github.com
+UPDATE_SOURCE_ALLOWED_DOWNLOAD_HOSTS=github.com,objects.githubusercontent.com
+UPDATE_SOURCE_CHECKSUM_REQUIRED=false
+```
+
+The default source remains `Wei-Shaw/sub2api`. For GitHub Enterprise, set `UPDATE_SOURCE_API_BASE_URL` to the API root, such as `https://github.example.com/api/v3`, and include the release asset hosts in `UPDATE_SOURCE_ALLOWED_DOWNLOAD_HOSTS`.
 
 #### Useful Commands
 
@@ -241,6 +256,7 @@ docker compose logs -f sub2api
 ```
 
 **What the script does:**
+
 - Downloads `docker-compose.local.yml` (saved as `docker-compose.yml`) and `.env.example`
 - Generates secure credentials (JWT_SECRET, TOTP_ENCRYPTION_KEY, POSTGRES_PASSWORD)
 - Creates `.env` file with auto-generated secrets
@@ -284,6 +300,7 @@ SERVER_PORT=8080
 ```
 
 **Generate secure secrets:**
+
 ```bash
 # Generate JWT_SECRET
 openssl rand -hex 32
@@ -327,6 +344,7 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 Open `http://YOUR_SERVER_IP:8080` in your browser.
 
 If admin password was auto-generated, find it in logs:
+
 ```bash
 docker compose -f docker-compose.local.yml logs sub2api | grep "admin password"
 ```
@@ -486,22 +504,26 @@ SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=true
 ```
 
 **Risks of allowing HTTP:**
+
 - API keys and data transmitted in **plaintext** (vulnerable to interception)
 - Susceptible to **man-in-the-middle (MITM) attacks**
 - **NOT suitable for production** environments
 
 **When to use HTTP:**
-- ✅ Development/testing with local servers (http://localhost)
+
+- ✅ Development/testing with local servers (<http://localhost>)
 - ✅ Internal networks with trusted endpoints
 - ✅ Testing account connectivity before obtaining HTTPS
 - ❌ Production environments (use HTTPS only)
 
 **Example error without this setting:**
+
 ```
 Invalid base URL: invalid url scheme: http
 ```
 
 If you disable URL validation or response header filtering, harden your network layer:
+
 - Enforce an egress allowlist for upstream domains/IPs
 - Block private/loopback/link-local ranges
 - Enforce TLS-only outbound traffic

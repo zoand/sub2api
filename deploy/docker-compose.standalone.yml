@@ -93,6 +93,16 @@ services:
       # SECURITY: This repo does not embed third-party client_secret.
       - GEMINI_CLI_OAUTH_CLIENT_SECRET=${GEMINI_CLI_OAUTH_CLIENT_SECRET:-}
       - ANTIGRAVITY_OAUTH_CLIENT_SECRET=${ANTIGRAVITY_OAUTH_CLIENT_SECRET:-}
+
+      # =======================================================================
+      # Update Configuration (在线更新配置)
+      # =======================================================================
+      - UPDATE_PROXY_URL=${UPDATE_PROXY_URL:-}
+      - UPDATE_SOURCE_TYPE=${UPDATE_SOURCE_TYPE:-github_release}
+      - UPDATE_SOURCE_REPOSITORY=${UPDATE_SOURCE_REPOSITORY:-Wei-Shaw/sub2api}
+      - UPDATE_SOURCE_API_BASE_URL=${UPDATE_SOURCE_API_BASE_URL:-https://api.github.com}
+      - UPDATE_SOURCE_ALLOWED_DOWNLOAD_HOSTS=${UPDATE_SOURCE_ALLOWED_DOWNLOAD_HOSTS:-github.com,objects.githubusercontent.com}
+      - UPDATE_SOURCE_CHECKSUM_REQUIRED=${UPDATE_SOURCE_CHECKSUM_REQUIRED:-false}
     healthcheck:
       test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
       interval: 30s

@@ -146,6 +146,12 @@ services:
       # Proxy for accessing GitHub (online updates + pricing data)
       # Examples: http://host:port, socks5://host:port
       - UPDATE_PROXY_URL=${UPDATE_PROXY_URL:-}
+      # Online update release source
+      - UPDATE_SOURCE_TYPE=${UPDATE_SOURCE_TYPE:-github_release}
+      - UPDATE_SOURCE_REPOSITORY=${UPDATE_SOURCE_REPOSITORY:-Wei-Shaw/sub2api}
+      - UPDATE_SOURCE_API_BASE_URL=${UPDATE_SOURCE_API_BASE_URL:-https://api.github.com}
+      - UPDATE_SOURCE_ALLOWED_DOWNLOAD_HOSTS=${UPDATE_SOURCE_ALLOWED_DOWNLOAD_HOSTS:-github.com,objects.githubusercontent.com}
+      - UPDATE_SOURCE_CHECKSUM_REQUIRED=${UPDATE_SOURCE_CHECKSUM_REQUIRED:-false}
     depends_on:
       postgres:
         condition: service_healthy

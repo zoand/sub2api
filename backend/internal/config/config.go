@@ -149,7 +149,33 @@ type UpdateConfig struct {
 	// ProxyURL 用于访问 GitHub 的代理地址
 	// 支持 http/https/socks5/socks5h 协议
 	// 例如: "http://127.0.0.1:7890", "socks5://127.0.0.1:1080"
-	ProxyURL string `mapstructure:"proxy_url"`
+	ProxyURL string             `mapstructure:"proxy_url"`
+	Source   UpdateSourceConfig `mapstructure:"source"`
+}
+
+const (
+	UpdateSourceTypeGitHubRelease       = "github_release"
+	DefaultUpdateSourceRepository       = "Wei-Shaw/sub2api"
+	DefaultUpdateSourceAPIBaseURL       = "https://api.github.com"
+	DefaultUpdateSourceChecksumRequired = false
+)
+
+var DefaultUpdateSourceAllowedDownloadHosts = []string{
+	"github.com",
+	"objects.githubusercontent.com",
+}
+
+type UpdateSourceConfig struct {
+	// Type 当前支持 github_release，后续可扩展 manifest 等源类型。
+	Type string `mapstructure:"type"`
+	// Repository 为 GitHub owner/repo，例如 Wei-Shaw/sub2api 或 zoand/sub2api。
+	Repository string `mapstructure:"repository"`
+	// APIBaseURL 为 GitHub API 根地址。GitHub Enterprise 可设置为 https://host/api/v3。
+	APIBaseURL string `mapstructure:"api_base_url"`
+	// AllowedDownloadHosts 为 release asset 下载允许域名，支持父域匹配。
+	AllowedDownloadHosts []string `mapstructure:"allowed_download_hosts"`
+	// ChecksumRequired 为 true 时，release 必须包含 checksums.txt。
+	ChecksumRequired bool `mapstructure:"checksum_required"`
 }
 
 type IdempotencyConfig struct {
@@ -1285,6 +1311,7 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	cfg.Log.Environment = strings.TrimSpace(cfg.Log.Environment)
 	cfg.Log.StacktraceLevel = strings.ToLower(strings.TrimSpace(cfg.Log.StacktraceLevel))
 	cfg.Log.Output.FilePath = strings.TrimSpace(cfg.Log.Output.FilePath)
+	normalizeUpdateConfig(&cfg.Update)
 	cfg.Gateway.ForcedCodexInstructionsTemplateFile = strings.TrimSpace(cfg.Gateway.ForcedCodexInstructionsTemplateFile)
 	if cfg.Gateway.ForcedCodexInstructionsTemplateFile != "" {
 		content, err := os.ReadFile(cfg.Gateway.ForcedCodexInstructionsTemplateFile)
@@ -1564,6 +1591,14 @@ func setDefaults() {
 	viper.SetDefault("pricing.update_interval_hours", 24)
 	viper.SetDefault("pricing.hash_check_interval_minutes", 10)
 
+	// Update source - GitHub Release by default.
+	viper.SetDefault("update.proxy_url", "")
+	viper.SetDefault("update.source.type", UpdateSourceTypeGitHubRelease)
+	viper.SetDefault("update.source.repository", DefaultUpdateSourceRepository)
+	viper.SetDefault("update.source.api_base_url", DefaultUpdateSourceAPIBaseURL)
+	viper.SetDefault("update.source.allowed_download_hosts", append([]string(nil), DefaultUpdateSourceAllowedDownloadHosts...))
+	viper.SetDefault("update.source.checksum_required", DefaultUpdateSourceChecksumRequired)
+
 	// Timezone (default to Asia/Shanghai for Chinese users)
 	viper.SetDefault("timezone", "Asia/Shanghai")
 
@@ -1821,6 +1856,9 @@ func (c *Config) Validate() error {
 	}
 	if c.SubscriptionMaintenance.QueueSize < 0 {
 		return fmt.Errorf("subscription_maintenance.queue_size must be non-negative")
+	}
+	if err := validateUpdateConfig(c.Update); err != nil {
+		return err
 	}
 
 	// Gemini OAuth 配置校验：client_id 与 client_secret 必须同时设置或同时留空。
@@ -2545,6 +2583,103 @@ func normalizeStringSlice(values []string) []string {
 		normalized = append(normalized, trimmed)
 	}
 	return normalized
+}
+
+func normalizeUpdateConfig(cfg *UpdateConfig) {
+	if cfg == nil {
+		return
+	}
+
+	cfg.ProxyURL = strings.TrimSpace(cfg.ProxyURL)
+	cfg.Source.Type = strings.ToLower(strings.TrimSpace(cfg.Source.Type))
+	if cfg.Source.Type == "" {
+		cfg.Source.Type = UpdateSourceTypeGitHubRelease
+	}
+	cfg.Source.Repository = strings.Trim(strings.TrimSpace(cfg.Source.Repository), "/")
+	if cfg.Source.Repository == "" {
+		cfg.Source.Repository = DefaultUpdateSourceRepository
+	}
+	cfg.Source.APIBaseURL = strings.TrimRight(strings.TrimSpace(cfg.Source.APIBaseURL), "/")
+	if cfg.Source.APIBaseURL == "" {
+		cfg.Source.APIBaseURL = DefaultUpdateSourceAPIBaseURL
+	}
+
+	if raw, ok := os.LookupEnv("UPDATE_SOURCE_ALLOWED_DOWNLOAD_HOSTS"); ok {
+		cfg.Source.AllowedDownloadHosts = splitCommaSeparated(raw)
+	} else {
+		cfg.Source.AllowedDownloadHosts = normalizeStringSlice(cfg.Source.AllowedDownloadHosts)
+	}
+	if len(cfg.Source.AllowedDownloadHosts) == 0 {
+		cfg.Source.AllowedDownloadHosts = append([]string(nil), DefaultUpdateSourceAllowedDownloadHosts...)
+	}
+}
+
+func splitCommaSeparated(raw string) []string {
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			values = append(values, trimmed)
+		}
+	}
+	return values
+}
+
+func validateUpdateConfig(cfg UpdateConfig) error {
+	source := cfg.Source
+	if source.Type != UpdateSourceTypeGitHubRelease {
+		return fmt.Errorf("update.source.type must be %q", UpdateSourceTypeGitHubRelease)
+	}
+	if err := validateGitHubRepository(source.Repository); err != nil {
+		return fmt.Errorf("update.source.repository invalid: %w", err)
+	}
+	if err := ValidateAbsoluteHTTPURL(source.APIBaseURL); err != nil {
+		return fmt.Errorf("update.source.api_base_url invalid: %w", err)
+	}
+	warnIfInsecureURL("update.source.api_base_url", source.APIBaseURL)
+	if len(source.AllowedDownloadHosts) == 0 {
+		return fmt.Errorf("update.source.allowed_download_hosts must not be empty")
+	}
+	for _, host := range source.AllowedDownloadHosts {
+		if err := validateAllowedHostPattern(host); err != nil {
+			return fmt.Errorf("update.source.allowed_download_hosts invalid %q: %w", host, err)
+		}
+	}
+	return nil
+}
+
+func validateGitHubRepository(repo string) error {
+	repo = strings.Trim(repo, "/")
+	if repo == "" {
+		return fmt.Errorf("empty repository")
+	}
+	if strings.Contains(repo, "://") {
+		return fmt.Errorf("must use owner/repo, not URL")
+	}
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return fmt.Errorf("must be owner/repo")
+	}
+	return nil
+}
+
+func validateAllowedHostPattern(host string) error {
+	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.TrimPrefix(host, "*.")
+	if host == "" {
+		return fmt.Errorf("empty host")
+	}
+	if strings.ContainsAny(host, "/\\ \t\r\n") {
+		return fmt.Errorf("must be host only")
+	}
+	if strings.Contains(host, ":") {
+		return fmt.Errorf("must not include port")
+	}
+	if strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
+		return fmt.Errorf("invalid dot placement")
+	}
+	return nil
 }
 
 func isWeakJWTSecret(secret string) bool {

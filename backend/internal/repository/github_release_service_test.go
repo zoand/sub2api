@@ -229,20 +229,20 @@ func (s *GitHubReleaseServiceSuite) TestFetchLatestRelease_Success() {
 		_, _ = w.Write([]byte(releaseJSON))
 	}))
 
-	// Use custom transport to redirect requests to test server
-	s.client = &githubReleaseClient{
-		httpClient: &http.Client{
-			Transport: &testTransport{testServerURL: s.srv.URL},
-		},
-		downloadHTTPClient: &http.Client{},
-	}
+	s.client = newTestGitHubReleaseClient()
 
-	release, err := s.client.FetchLatestRelease(context.Background(), "test/repo")
+	release, err := s.client.FetchLatestRelease(context.Background(), s.srv.URL, "test/repo")
 	require.NoError(s.T(), err)
 	require.Equal(s.T(), "v1.0.0", release.TagName)
 	require.Equal(s.T(), "Release 1.0.0", release.Name)
 	require.Len(s.T(), release.Assets, 1)
 	require.Equal(s.T(), "app-linux-amd64.tar.gz", release.Assets[0].Name)
+}
+
+func (s *GitHubReleaseServiceSuite) TestBuildLatestReleaseURL_CustomAPIBasePath() {
+	got, err := buildLatestReleaseURL("https://github.example.com/api/v3", "owner/repo")
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), "https://github.example.com/api/v3/repos/owner/repo/releases/latest", got)
 }
 
 func (s *GitHubReleaseServiceSuite) TestFetchLatestRelease_Non200() {
@@ -257,7 +257,7 @@ func (s *GitHubReleaseServiceSuite) TestFetchLatestRelease_Non200() {
 		downloadHTTPClient: &http.Client{},
 	}
 
-	_, err := s.client.FetchLatestRelease(context.Background(), "test/repo")
+	_, err := s.client.FetchLatestRelease(context.Background(), s.srv.URL, "test/repo")
 	require.Error(s.T(), err)
 	require.Contains(s.T(), err.Error(), "404")
 }
@@ -275,7 +275,7 @@ func (s *GitHubReleaseServiceSuite) TestFetchLatestRelease_InvalidJSON() {
 		downloadHTTPClient: &http.Client{},
 	}
 
-	_, err := s.client.FetchLatestRelease(context.Background(), "test/repo")
+	_, err := s.client.FetchLatestRelease(context.Background(), s.srv.URL, "test/repo")
 	require.Error(s.T(), err)
 }
 
@@ -294,7 +294,7 @@ func (s *GitHubReleaseServiceSuite) TestFetchLatestRelease_ContextCancel() {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := s.client.FetchLatestRelease(ctx, "test/repo")
+	_, err := s.client.FetchLatestRelease(ctx, s.srv.URL, "test/repo")
 	require.Error(s.T(), err)
 }
 

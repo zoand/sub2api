@@ -27,7 +27,7 @@
 
 | 邮箱 | 密码 |
 |------|------|
-| admin@sub2api.org | admin123 |
+| <admin@sub2api.org> | admin123 |
 
 ## 项目概述
 
@@ -206,6 +206,7 @@ curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install
 ```
 
 脚本会自动：
+
 1. 检测系统架构
 2. 下载最新版本
 3. 安装二进制文件到 `/opt/sub2api`
@@ -226,6 +227,7 @@ sudo systemctl enable sub2api
 ```
 
 设置向导将引导你完成：
+
 - 数据库配置
 - Redis 配置
 - 管理员账号创建
@@ -235,9 +237,22 @@ sudo systemctl enable sub2api
 可以直接在 **管理后台** 左上角点击 **检测更新** 按钮进行在线升级。
 
 网页升级功能支持：
+
 - 自动检测新版本
 - 一键下载并应用更新
 - 支持回滚
+
+Fork 版本如需让后台在线更新检测自己的 Release，可在 `.env` 中覆盖更新源：
+
+```env
+UPDATE_SOURCE_TYPE=github_release
+UPDATE_SOURCE_REPOSITORY=zoand/sub2api
+UPDATE_SOURCE_API_BASE_URL=https://api.github.com
+UPDATE_SOURCE_ALLOWED_DOWNLOAD_HOSTS=github.com,objects.githubusercontent.com
+UPDATE_SOURCE_CHECKSUM_REQUIRED=false
+```
+
+默认仍使用官方 `Wei-Shaw/sub2api`。如果使用 GitHub Enterprise，可将 `UPDATE_SOURCE_API_BASE_URL` 设置为对应的 API 根地址，例如 `https://github.example.com/api/v3`，并把 release asset 的下载域名加入 `UPDATE_SOURCE_ALLOWED_DOWNLOAD_HOSTS`。
 
 #### 常用命令
 
@@ -285,6 +300,7 @@ docker compose logs -f sub2api
 ```
 
 **脚本功能：**
+
 - 下载 `docker-compose.local.yml`（本地保存为 `docker-compose.yml`）和 `.env.example`
 - 自动生成安全凭证（JWT_SECRET、TOTP_ENCRYPTION_KEY、POSTGRES_PASSWORD）
 - 创建 `.env` 文件并填充自动生成的密钥
@@ -328,6 +344,7 @@ SERVER_PORT=8080
 ```
 
 **生成安全密钥：**
+
 ```bash
 # 生成 JWT_SECRET
 openssl rand -hex 32
@@ -383,6 +400,7 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 在浏览器中打开 `http://你的服务器IP:8080`
 
 如果管理员密码是自动生成的，在日志中查找：
+
 ```bash
 docker compose -f docker-compose.local.yml logs sub2api | grep "admin password"
 ```
@@ -528,6 +546,7 @@ gateway:
 > 如需更严格的访问控制，可将 `sora_media_require_api_key` 设为 true，仅允许携带 API Key 的 `/sora/media` 访问。
 
 访问策略说明：
+
 - `/sora/media`：内部调用或客户端携带 API Key 才能下载
 - `/sora/media-signed`：外部可访问，但有签名 + 过期控制
 
@@ -571,22 +590,26 @@ SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=true
 ```
 
 **允许 HTTP 的风险：**
+
 - API 密钥和数据以**明文传输**（可被截获）
 - 易受**中间人攻击 (MITM)**
 - **不适合生产环境**
 
 **适用场景：**
-- ✅ 开发/测试环境的本地服务器（http://localhost）
+
+- ✅ 开发/测试环境的本地服务器（<http://localhost）>
 - ✅ 内网可信端点
 - ✅ 获取 HTTPS 前测试账号连通性
 - ❌ 生产环境（仅使用 HTTPS）
 
 **未设置此项时的错误示例：**
+
 ```
 Invalid base URL: invalid url scheme: http
 ```
 
 如关闭 URL 校验或响应头过滤，请加强网络层防护：
+
 - 出站访问白名单限制上游域名/IP
 - 阻断私网/回环/链路本地地址
 - 强制仅允许 TLS 出站
@@ -605,7 +628,7 @@ Invalid base URL: invalid url scheme: http
 
 ```caddyfile
 transport http {
-	versions h2c h1
+ versions h2c h1
 }
 ```
 
@@ -678,9 +701,9 @@ Antigravity 账户支持可选的**混合调度**功能。开启后，通用端�
 
 > **⚠️ 注意**：Anthropic Claude 和 Antigravity Claude **不能在同一上下文中混合使用**，请通过分组功能做好隔离。
 
-
 ### 已知问题
-在 Claude Code 中，无法自动退出Plan Mode。（正常使用原生Claude Api时，Plan 完成后，Claude Code会弹出弹出选项让用户同意或拒绝Plan。） 
+
+在 Claude Code 中，无法自动退出Plan Mode。（正常使用原生Claude Api时，Plan 完成后，Claude Code会弹出弹出选项让用户同意或拒绝Plan。）
 解决办法：shift + Tab，手动退出Plan mode，然后输入内容 告诉 Claude Code 同意或拒绝 Plan
 ---
 

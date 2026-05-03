@@ -3047,6 +3047,9 @@ export default {
         oauthPassthrough: '自动透传（仅替换认证）',
         oauthPassthroughDesc:
           '开启后，该 OpenAI 账号将自动透传请求与响应，仅替换认证并保留计费/并发/审计及必要安全过滤；如遇兼容性问题可随时关闭回滚。',
+        apiKeyChatCompletionsUpstream: '兼容出口协议（chat/completions）',
+        apiKeyChatCompletionsUpstreamDesc:
+          '仅对 OpenAI API Key 生效。默认关闭，关闭时保持现有 Responses 兼容链路；开启后，仅 /v1/chat/completions 请求改为直接走上游 /v1/chat/completions，避免中间再套一层 Responses 转换。',
         responsesWebsocketsV2: 'Responses WebSocket v2',
         responsesWebsocketsV2Desc:
           '默认关闭。开启后可启用 responses_websockets_v2 协议能力（受网关全局开关与账号类型开关约束）。',

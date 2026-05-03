@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 )
 
@@ -297,4 +298,44 @@ func TestAccountTestService_OpenAI401SetsPermanentErrorOnly(t *testing.T) {
 	require.Zero(t, repo.rateLimitedID)
 	require.Zero(t, repo.clearedErrorID)
 	require.Nil(t, account.RateLimitResetAt)
+}
+
+func TestAccountTestService_OpenAIAPIKeyChatCompletionsProtocolUsesChatEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, recorder := newTestContext()
+
+	resp := newJSONResponse(http.StatusOK, `{
+		"id":"chatcmpl-test",
+		"object":"chat.completion",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"compat-ok"},"finish_reason":"stop"}]
+	}`)
+	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
+	svc := &AccountTestService{
+		httpUpstream: upstream,
+		cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}},
+	}
+	account := &Account{
+		ID:          81,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Concurrency: 1,
+		Credentials: map[string]any{"api_key": "sk-test", "base_url": "https://compat.example.com/v1"},
+		Extra: map[string]any{
+			"openai_apikey_upstream_protocol": "chat_completions",
+		},
+	}
+
+	err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.5", "", "")
+	require.NoError(t, err)
+	require.Len(t, upstream.requests, 1)
+	require.Equal(t, "https://compat.example.com/v1/chat/completions", upstream.requests[0].URL.String())
+	require.Equal(t, "Bearer sk-test", upstream.requests[0].Header.Get("Authorization"))
+	require.Equal(t, "application/json", upstream.requests[0].Header.Get("Content-Type"))
+	body, readErr := io.ReadAll(upstream.requests[0].Body)
+	require.NoError(t, readErr)
+	require.Contains(t, string(body), `"model":"gpt-5.5"`)
+	require.Contains(t, string(body), `"messages"`)
+	require.Contains(t, string(body), `"content":"hi"`)
+	require.Contains(t, recorder.Body.String(), "compat-ok")
+	require.Contains(t, recorder.Body.String(), "test_complete")
 }

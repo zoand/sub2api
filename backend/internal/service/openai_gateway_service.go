@@ -38,9 +38,10 @@ const (
 	// ChatGPT internal API for OAuth accounts
 	chatgptCodexURL = "https://chatgpt.com/backend-api/codex/responses"
 	// OpenAI Platform API for API Key accounts (fallback)
-	openaiPlatformAPIURL   = "https://api.openai.com/v1/responses"
-	openaiStickySessionTTL = time.Hour // 粘性会话TTL
-	codexCLIUserAgent      = "codex_cli_rs/0.125.0"
+	openaiPlatformAPIURL             = "https://api.openai.com/v1/responses"
+	openaiPlatformChatCompletionsURL = "https://api.openai.com/v1/chat/completions"
+	openaiStickySessionTTL           = time.Hour // 粘性会话TTL
+	codexCLIUserAgent                = "codex_cli_rs/0.125.0"
 	// codex_cli_only 拒绝时单个请求头日志长度上限（字符）
 	codexCLIOnlyHeaderValueMaxBytes = 256
 
@@ -57,6 +58,9 @@ const (
 	codexCLIVersion                    = "0.125.0"
 	// Codex 限额快照仅用于后台展示/诊断，不需要每个成功请求都立即落库。
 	openAICodexSnapshotPersistMinInterval = 30 * time.Second
+	// ContextKeyUpstreamEndpointOverride allows the service layer to override
+	// the upstream endpoint recorded by handlers for ops and usage logging.
+	ContextKeyUpstreamEndpointOverride = "_gateway_upstream_endpoint_override"
 )
 
 // OpenAI allowed headers whitelist (for non-passthrough).
@@ -3083,6 +3087,55 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	return req, nil
 }
 
+func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIChatCompletionsCompatibility(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+	token string,
+) (*http.Request, error) {
+	targetURL := openaiPlatformChatCompletionsURL
+	baseURL := account.GetOpenAIBaseURL()
+	if baseURL != "" {
+		validatedURL, err := s.validateUpstreamBaseURL(baseURL)
+		if err != nil {
+			return nil, err
+		}
+		targetURL = buildOpenAIChatCompletionsURL(validatedURL)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("authorization", "Bearer "+token)
+	if c != nil && c.Request != nil {
+		for key, values := range c.Request.Header {
+			lowerKey := strings.ToLower(key)
+			if !openaiAllowedHeaders[lowerKey] {
+				continue
+			}
+			for _, v := range values {
+				req.Header.Add(key, v)
+			}
+		}
+	}
+
+	customUA := account.GetOpenAIUserAgent()
+	if customUA != "" {
+		req.Header.Set("user-agent", customUA)
+	}
+	if s.cfg != nil && s.cfg.Gateway.ForceCodexCLI {
+		req.Header.Set("user-agent", codexCLIUserAgent)
+	}
+	if req.Header.Get("content-type") == "" {
+		req.Header.Set("content-type", "application/json")
+	}
+
+	return req, nil
+}
+
 func shouldFailoverOpenAIPassthroughResponse(statusCode int) bool {
 	switch statusCode {
 	case http.StatusTooManyRequests, 529:
@@ -4485,14 +4538,29 @@ func extractOpenAIUsageFromJSONBytes(body []byte) (OpenAIUsage, bool) {
 		body,
 		"usage.input_tokens",
 		"usage.output_tokens",
+		"usage.prompt_tokens",
+		"usage.completion_tokens",
 		"usage.input_tokens_details.cached_tokens",
+		"usage.prompt_tokens_details.cached_tokens",
 		"usage.output_tokens_details.image_tokens",
 	)
+	inputTokens := int(values[0].Int())
+	if inputTokens == 0 {
+		inputTokens = int(values[2].Int())
+	}
+	outputTokens := int(values[1].Int())
+	if outputTokens == 0 {
+		outputTokens = int(values[3].Int())
+	}
+	cacheReadInputTokens := int(values[4].Int())
+	if cacheReadInputTokens == 0 {
+		cacheReadInputTokens = int(values[5].Int())
+	}
 	return OpenAIUsage{
-		InputTokens:          int(values[0].Int()),
-		OutputTokens:         int(values[1].Int()),
-		CacheReadInputTokens: int(values[2].Int()),
-		ImageOutputTokens:    int(values[3].Int()),
+		InputTokens:          inputTokens,
+		OutputTokens:         outputTokens,
+		CacheReadInputTokens: cacheReadInputTokens,
+		ImageOutputTokens:    int(values[6].Int()),
 	}, true
 }
 
@@ -4801,6 +4869,20 @@ func buildOpenAIResponsesURL(base string) string {
 		return normalized + "/responses"
 	}
 	return normalized + "/v1/responses"
+}
+
+func buildOpenAIChatCompletionsURL(base string) string {
+	normalized := strings.TrimRight(strings.TrimSpace(base), "/")
+	if normalized == "" {
+		return openaiPlatformChatCompletionsURL
+	}
+	if strings.HasSuffix(normalized, "/v1/chat/completions") || strings.HasSuffix(normalized, "/chat/completions") {
+		return normalized
+	}
+	if strings.HasSuffix(normalized, "/v1") {
+		return normalized + "/chat/completions"
+	}
+	return normalized + "/v1/chat/completions"
 }
 
 func trimOpenAIEncryptedReasoningItems(reqBody map[string]any) bool {

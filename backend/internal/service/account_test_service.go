@@ -493,7 +493,6 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 // testOpenAIAccountConnection tests an OpenAI account's connection
 func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account *Account, modelID string, prompt string, mode string) error {
 	ctx := c.Request.Context()
-	_ = prompt
 	mode = normalizeAccountTestMode(mode)
 
 	// Default to openai.DefaultTestModel for OpenAI testing
@@ -520,6 +519,10 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 			return s.testOpenAIImageAPIKey(c, ctx, account, testModelID, imagePrompt)
 		}
 		return s.testOpenAIImageOAuth(c, ctx, account, testModelID, imagePrompt)
+	}
+
+	if account.UsesOpenAIAPIKeyChatCompletionsUpstream() {
+		return s.testOpenAIChatCompletionsAPIKey(c, ctx, account, testModelID, prompt)
 	}
 
 	// Determine authentication method and API URL
@@ -625,6 +628,75 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 
 	// Process SSE stream
 	return s.processOpenAIStream(c, resp.Body)
+}
+
+func (s *AccountTestService) testOpenAIChatCompletionsAPIKey(c *gin.Context, ctx context.Context, account *Account, testModelID string, prompt string) error {
+	authToken := account.GetOpenAIApiKey()
+	if authToken == "" {
+		return s.sendErrorAndEnd(c, "No API key available")
+	}
+
+	baseURL := account.GetOpenAIBaseURL()
+	if baseURL == "" {
+		baseURL = "https://api.openai.com"
+	}
+	normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
+	}
+	apiURL := buildOpenAIChatCompletionsURL(normalizedBaseURL)
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Flush()
+
+	testPrompt := strings.TrimSpace(prompt)
+	if testPrompt == "" {
+		testPrompt = "hi"
+	}
+	payloadBytes, _ := json.Marshal(createOpenAIChatCompletionsTestPayload(testModelID, testPrompt))
+	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return s.sendErrorAndEnd(c, "Failed to create request")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+authToken)
+	if customUA := strings.TrimSpace(account.GetOpenAIUserAgent()); customUA != "" {
+		req.Header.Set("User-Agent", customUA)
+	}
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+
+	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Request failed: %s", err.Error()))
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to read response: %s", err.Error()))
+	}
+	if resp.StatusCode != http.StatusOK {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
+	}
+
+	text, err := extractOpenAIChatCompletionsTestText(body)
+	if err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
+	if text != "" {
+		s.sendEvent(c, TestEvent{Type: "content", Text: text})
+	}
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
 }
 
 // testOpenAICompactConnection probes /responses/compact and persists the
@@ -1183,6 +1255,63 @@ func createOpenAITestPayload(modelID string, isOAuth bool) map[string]any {
 	payload["instructions"] = openai.DefaultInstructions
 
 	return payload
+}
+
+func createOpenAIChatCompletionsTestPayload(modelID string, prompt string) map[string]any {
+	return map[string]any{
+		"model": modelID,
+		"messages": []map[string]any{
+			{
+				"role":    "user",
+				"content": prompt,
+			},
+		},
+		"stream": false,
+	}
+}
+
+func extractOpenAIChatCompletionsTestText(body []byte) (string, error) {
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("Failed to parse response: %s", err.Error())
+	}
+	if len(result.Choices) == 0 {
+		return "", errors.New("No choices returned from API")
+	}
+
+	content := result.Choices[0].Message.Content
+	if len(content) == 0 || string(content) == "null" {
+		return "", errors.New("No content returned from API")
+	}
+
+	var text string
+	if err := json.Unmarshal(content, &text); err == nil {
+		return text, nil
+	}
+
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(content, &parts); err == nil {
+		var builder strings.Builder
+		for _, part := range parts {
+			if part.Type == "text" || part.Type == "" {
+				builder.WriteString(part.Text)
+			}
+		}
+		if builder.Len() > 0 {
+			return builder.String(), nil
+		}
+	}
+
+	return "", errors.New("No text content returned from API")
 }
 
 // processClaudeStream processes the SSE stream from Claude API

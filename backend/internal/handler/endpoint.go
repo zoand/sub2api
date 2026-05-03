@@ -171,6 +171,13 @@ func GetInboundEndpoint(c *gin.Context) string {
 // and the account platform. Handlers call this after scheduling an
 // account, passing account.Platform.
 func GetUpstreamEndpoint(c *gin.Context, platform string) string {
+	if c != nil {
+		if v, ok := c.Get(service.ContextKeyUpstreamEndpointOverride); ok {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
 	inbound := GetInboundEndpoint(c)
 	rawPath := ""
 	if c != nil && c.Request != nil && c.Request.URL != nil {

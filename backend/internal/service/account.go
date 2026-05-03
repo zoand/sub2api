@@ -1138,6 +1138,55 @@ func (a *Account) IsOpenAIPassthroughEnabled() bool {
 	return false
 }
 
+const (
+	OpenAIUpstreamProtocolResponses       = "responses"
+	OpenAIUpstreamProtocolChatCompletions = "chat_completions"
+)
+
+func normalizeOpenAIUpstreamProtocol(protocol string) string {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case OpenAIUpstreamProtocolResponses:
+		return OpenAIUpstreamProtocolResponses
+	case OpenAIUpstreamProtocolChatCompletions:
+		return OpenAIUpstreamProtocolChatCompletions
+	default:
+		return ""
+	}
+}
+
+// ResolveOpenAIAPIKeyUpstreamProtocol 返回 OpenAI API Key 账号的上游协议族。
+//
+// 分类型新字段：
+// - accounts.extra.openai_apikey_upstream_protocol
+//
+// 兼容字段：
+// - accounts.extra.openai_upstream_protocol
+//
+// 当前支持值：responses / chat_completions。
+// 非法值或字段缺失时，默认回退到 responses。
+func (a *Account) ResolveOpenAIAPIKeyUpstreamProtocol() string {
+	if a == nil || !a.IsOpenAIApiKey() || a.Extra == nil {
+		return OpenAIUpstreamProtocolResponses
+	}
+	if protocol, ok := a.Extra["openai_apikey_upstream_protocol"].(string); ok {
+		if normalized := normalizeOpenAIUpstreamProtocol(protocol); normalized != "" {
+			return normalized
+		}
+	}
+	if protocol, ok := a.Extra["openai_upstream_protocol"].(string); ok {
+		if normalized := normalizeOpenAIUpstreamProtocol(protocol); normalized != "" {
+			return normalized
+		}
+	}
+	return OpenAIUpstreamProtocolResponses
+}
+
+// UsesOpenAIAPIKeyChatCompletionsUpstream 返回 OpenAI API Key 账号是否启用
+// chat/completions 兼容出口协议。
+func (a *Account) UsesOpenAIAPIKeyChatCompletionsUpstream() bool {
+	return a != nil && a.IsOpenAIApiKey() && a.ResolveOpenAIAPIKeyUpstreamProtocol() == OpenAIUpstreamProtocolChatCompletions
+}
+
 // IsOpenAIResponsesWebSocketV2Enabled 返回 OpenAI 账号是否开启 Responses WebSocket v2。
 //
 // 分类型新字段：

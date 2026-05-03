@@ -38,11 +38,11 @@ var cursorResponsesUnsupportedFields = []string{
 	"stream_options",
 }
 
-// ForwardAsChatCompletions accepts a Chat Completions request body, converts it
-// to OpenAI Responses API format, forwards to the OpenAI upstream, and converts
-// the response back to Chat Completions format. All account types (OAuth and API
-// Key) go through the Responses API conversion path since the upstream only
-// exposes the /v1/responses endpoint.
+// ForwardAsChatCompletions accepts a Chat Completions request body and forwards
+// it through the OpenAI gateway. By default the request is converted to
+// Responses format for upstream compatibility. OpenAI API Key accounts can
+// opt into a direct chat/completions upstream path via
+// accounts.extra.openai_apikey_upstream_protocol=chat_completions.
 func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	ctx context.Context,
 	c *gin.Context,
@@ -66,6 +66,10 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	// derive a stable seed from the final upstream model family.
 	billingModel := resolveOpenAIForwardModel(account, originalModel, defaultMappedModel)
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
+
+	if account != nil && account.UsesOpenAIAPIKeyChatCompletionsUpstream() {
+		return s.forwardAsChatCompletionsCompatibleUpstream(ctx, c, account, body, originalModel, billingModel, upstreamModel, clientStream, startTime)
+	}
 
 	promptCacheKey = strings.TrimSpace(promptCacheKey)
 	compatPromptCacheInjected := false
@@ -291,6 +295,146 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	}
 
 	return result, handleErr
+}
+
+func (s *OpenAIGatewayService) forwardAsChatCompletionsCompatibleUpstream(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+	originalModel string,
+	billingModel string,
+	upstreamModel string,
+	clientStream bool,
+	startTime time.Time,
+) (*OpenAIForwardResult, error) {
+	rewrittenBody := body
+	var err error
+	if upstreamModel != "" && upstreamModel != originalModel {
+		rewrittenBody, err = sjson.SetBytes(rewrittenBody, "model", upstreamModel)
+		if err != nil {
+			return nil, fmt.Errorf("rewrite model in chat completions body: %w", err)
+		}
+	}
+
+	sanitizedBody, sanitized, err := sanitizeEmptyBase64InputImagesInOpenAIBody(rewrittenBody)
+	if err != nil {
+		return nil, err
+	}
+	if sanitized {
+		rewrittenBody = sanitizedBody
+	}
+
+	updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, rewrittenBody)
+	if policyErr != nil {
+		var blocked *OpenAIFastBlockedError
+		if errors.As(policyErr, &blocked) {
+			writeChatCompletionsError(c, http.StatusForbidden, "permission_error", blocked.Message)
+		}
+		return nil, policyErr
+	}
+	rewrittenBody = updatedBody
+
+	token, _, err := s.GetAccessToken(ctx, account)
+	if err != nil {
+		return nil, fmt.Errorf("get access token: %w", err)
+	}
+
+	upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, clientStream)
+	upstreamReq, err := s.buildUpstreamRequestOpenAIChatCompletionsCompatibility(upstreamCtx, c, account, rewrittenBody, token)
+	releaseUpstreamCtx()
+	if err != nil {
+		return nil, fmt.Errorf("build chat completions compatibility request: %w", err)
+	}
+
+	proxyURL := ""
+	if account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+	setOpsUpstreamRequestBody(c, rewrittenBody)
+	if c != nil {
+		c.Set(ContextKeyUpstreamEndpointOverride, "/v1/chat/completions")
+	}
+
+	resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+	if err != nil {
+		safeErr := sanitizeUpstreamErrorMessage(err.Error())
+		setOpsUpstreamError(c, 0, safeErr, "")
+		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+			Platform:           account.Platform,
+			AccountID:          account.ID,
+			AccountName:        account.Name,
+			UpstreamStatusCode: 0,
+			Kind:               "request_error",
+			Message:            safeErr,
+		})
+		writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed")
+		return nil, fmt.Errorf("upstream request failed: %s", safeErr)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		_ = resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+
+		upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
+		upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+		if s.shouldFailoverOpenAIUpstreamResponse(resp.StatusCode, upstreamMsg, respBody) {
+			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+				Platform:           account.Platform,
+				AccountID:          account.ID,
+				AccountName:        account.Name,
+				UpstreamStatusCode: resp.StatusCode,
+				UpstreamRequestID:  resp.Header.Get("x-request-id"),
+				Kind:               "failover",
+				Message:            upstreamMsg,
+			})
+			if s.rateLimitService != nil {
+				s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+			}
+			return nil, &UpstreamFailoverError{
+				StatusCode:             resp.StatusCode,
+				ResponseBody:           respBody,
+				RetryableOnSameAccount: account.IsPoolMode() && (isPoolModeRetryableStatus(resp.StatusCode) || isOpenAITransientProcessingError(resp.StatusCode, upstreamMsg, respBody)),
+			}
+		}
+		return s.handleChatCompletionsErrorResponse(resp, c, account)
+	}
+
+	var (
+		usage        *OpenAIUsage
+		firstTokenMs *int
+	)
+	if clientStream {
+		streamingResult, streamErr := s.handleStreamingResponsePassthrough(ctx, resp, c, account, startTime, originalModel, upstreamModel)
+		if streamErr != nil {
+			return nil, streamErr
+		}
+		usage = streamingResult.usage
+		firstTokenMs = streamingResult.firstTokenMs
+	} else {
+		usage, err = s.handleNonStreamingResponsePassthrough(ctx, resp, c, originalModel, upstreamModel)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if usage == nil {
+		usage = &OpenAIUsage{}
+	}
+
+	return &OpenAIForwardResult{
+		RequestID:       resp.Header.Get("x-request-id"),
+		Usage:           *usage,
+		Model:           originalModel,
+		BillingModel:    billingModel,
+		UpstreamModel:   upstreamModel,
+		ServiceTier:     extractOpenAIServiceTierFromBody(rewrittenBody),
+		ReasoningEffort: extractCCReasoningEffortFromBody(rewrittenBody),
+		Stream:          clientStream,
+		Duration:        time.Since(startTime),
+		FirstTokenMs:    firstTokenMs,
+	}, nil
 }
 
 func normalizeResponsesRequestServiceTier(req *apicompat.ResponsesRequest) {

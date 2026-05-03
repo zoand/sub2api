@@ -313,3 +313,69 @@ func TestAccount_OpenAIWSExtraFlags(t *testing.T) {
 	}
 	require.False(t, nonOpenAI.IsOpenAIWSAllowStoreRecoveryEnabled())
 }
+
+func TestAccount_ResolveOpenAIAPIKeyUpstreamProtocol(t *testing.T) {
+	t.Run("默认回退 responses", func(t *testing.T) {
+		account := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Extra: map[string]any{}}
+		require.Equal(t, OpenAIUpstreamProtocolResponses, account.ResolveOpenAIAPIKeyUpstreamProtocol())
+	})
+
+	t.Run("读取 API Key 专用字段", func(t *testing.T) {
+		account := &Account{
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeAPIKey,
+			Extra: map[string]any{
+				"openai_apikey_upstream_protocol": "chat_completions",
+			},
+		}
+		require.Equal(t, OpenAIUpstreamProtocolChatCompletions, account.ResolveOpenAIAPIKeyUpstreamProtocol())
+		require.True(t, account.UsesOpenAIAPIKeyChatCompletionsUpstream())
+	})
+
+	t.Run("兼容通用字段", func(t *testing.T) {
+		account := &Account{
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeAPIKey,
+			Extra: map[string]any{
+				"openai_upstream_protocol": "chat_completions",
+			},
+		}
+		require.Equal(t, OpenAIUpstreamProtocolChatCompletions, account.ResolveOpenAIAPIKeyUpstreamProtocol())
+	})
+
+	t.Run("专用字段优先于兼容字段", func(t *testing.T) {
+		account := &Account{
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeAPIKey,
+			Extra: map[string]any{
+				"openai_apikey_upstream_protocol": "responses",
+				"openai_upstream_protocol":        "chat_completions",
+			},
+		}
+		require.Equal(t, OpenAIUpstreamProtocolResponses, account.ResolveOpenAIAPIKeyUpstreamProtocol())
+	})
+
+	t.Run("非法值回退 responses", func(t *testing.T) {
+		account := &Account{
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeAPIKey,
+			Extra: map[string]any{
+				"openai_apikey_upstream_protocol": "invalid",
+			},
+		}
+		require.Equal(t, OpenAIUpstreamProtocolResponses, account.ResolveOpenAIAPIKeyUpstreamProtocol())
+		require.False(t, account.UsesOpenAIAPIKeyChatCompletionsUpstream())
+	})
+
+	t.Run("仅 OpenAI API Key 生效", func(t *testing.T) {
+		oauthAccount := &Account{
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeOAuth,
+			Extra: map[string]any{
+				"openai_apikey_upstream_protocol": "chat_completions",
+			},
+		}
+		require.Equal(t, OpenAIUpstreamProtocolResponses, oauthAccount.ResolveOpenAIAPIKeyUpstreamProtocol())
+		require.False(t, oauthAccount.UsesOpenAIAPIKeyChatCompletionsUpstream())
+	})
+}

@@ -45,6 +45,51 @@ Sub2API 是一个 AI API 网关平台，用于分发和管理 AI 产品订阅的
 - **管理后台** - Web 界面进行监控和管理
 - **外部系统集成** - 支持通过 iframe 嵌入外部系统（如工单等），扩展管理后台功能
 
+## OpenAI API Key 兼容出口协议说明
+
+当某个 OpenAI API Key 上游网关只支持 `/v1/chat/completions`，而不支持 Sub2API 默认使用的 `/v1/responses` 兼容链路时，可以在管理后台为该账号单独开启“兼容出口协议（chat/completions）”。
+
+### 适用范围
+
+- 仅对 **OpenAI API Key** 账号生效。
+- 仅影响客户端调用 `/v1/chat/completions` 这条入口时的**上游出口协议**。
+- 不影响 `/v1/responses`、`/v1/responses/compact`、图片接口，也不影响 OpenAI OAuth 账号。
+
+### 默认行为
+
+- 默认关闭。
+- 关闭时，Sub2API 保持原有行为：`/v1/chat/completions` 请求会先转换到内部 Responses 兼容链路，再向上游发送 `/v1/responses`。
+
+### 启用后的行为
+
+- 开启后，该 OpenAI API Key 账号收到的 `/v1/chat/completions` 请求将直接向上游发送 `/v1/chat/completions`。
+- 管理后台测试账号连接也会使用 `/v1/chat/completions`；正常调用的用量/运维日志上游端点会对应记录为 `/v1/chat/completions`，便于排查真实出口协议。
+- 关闭开关即可立即回滚到默认 Responses 兼容链路。
+
+### 管理后台位置
+
+- 新建账号：管理员后台 -> 账号管理 -> 新增 OpenAI API Key 账号。
+- 编辑账号：管理员后台 -> 账号管理 -> 编辑已有 OpenAI API Key 账号。
+- 开关名称：**兼容出口协议（chat/completions）**。
+
+### 配置字段
+
+如果通过导入或接口直接写入账号扩展字段，可使用：
+
+```json
+{
+  "extra": {
+    "openai_apikey_upstream_protocol": "chat_completions"
+  }
+}
+```
+
+### 边界说明
+
+- 这里的“兼容出口协议”指的是 `/v1/chat/completions`，**不包含**旧版 `/v1/completions`。
+- 该开关不是 `openai_passthrough` 的替代品；它只改变 OpenAI API Key 账号在 chat/completions 入口上的上游出口协议选择。
+- 如果上游既不支持 `/v1/responses`，也不支持 `/v1/chat/completions`，则仍需在上游侧增加额外兼容层。
+
 ## ❤️ 赞助商
 
 > [想出现在这里？](mailto:support@pincc.ai)

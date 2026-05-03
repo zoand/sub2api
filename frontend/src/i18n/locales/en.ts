@@ -2899,6 +2899,9 @@ export default {
         oauthPassthrough: 'Auto passthrough (auth only)',
         oauthPassthroughDesc:
           'When enabled, this OpenAI account uses automatic passthrough: the gateway forwards request/response as-is and only swaps auth, while keeping billing/concurrency/audit and necessary safety filtering.',
+        apiKeyChatCompletionsUpstream: 'Compatible upstream protocol (chat/completions)',
+        apiKeyChatCompletionsUpstreamDesc:
+          'Only applies to OpenAI API Key accounts. Disabled by default, which keeps the existing Responses compatibility path. When enabled, only /v1/chat/completions requests are sent directly to upstream /v1/chat/completions to avoid an extra Responses conversion hop.',
         responsesWebsocketsV2: 'Responses WebSocket v2',
         responsesWebsocketsV2Desc:
           'Disabled by default. Enable to allow responses_websockets_v2 capability (still gated by global and account-type switches).',

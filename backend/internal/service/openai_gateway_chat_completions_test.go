@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -334,4 +335,80 @@ func TestForwardAsChatCompletions_UpstreamRequestIgnoresClientCancel(t *testing.
 	require.NotNil(t, result)
 	require.NotNil(t, upstream.lastReq)
 	require.NoError(t, upstream.lastReq.Context().Err())
+}
+
+func TestOpenAIGatewayService_ForwardAsChatCompletions_CompatibleUpstreamUsesChatCompletionsEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(nil))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstreamResp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"application/json"},
+			"x-request-id": []string{"rid-compat"},
+		},
+		Body: io.NopCloser(bytes.NewReader([]byte(`{
+			"id":"chatcmpl-1",
+			"object":"chat.completion",
+			"created":1735689600,
+			"model":"upstream-gpt-compat",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"compat-ok"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
+		}`))),
+	}
+	upstream := &httpUpstreamRecorder{resp: upstreamResp}
+
+	svc := &OpenAIGatewayService{
+		httpUpstream: upstream,
+		cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}},
+	}
+	account := &Account{
+		ID:          7,
+		Name:        "compat-apikey",
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Concurrency: 1,
+		Credentials: map[string]any{"api_key": "sk-compat", "base_url": "https://compat.example.com/v1"},
+		Extra: map[string]any{
+			"openai_apikey_upstream_protocol": "chat_completions",
+		},
+	}
+
+	body := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"hello"}],"stream":false}`)
+	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "upstream-gpt-compat")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "https://compat.example.com/v1/chat/completions", upstream.lastReq.URL.String())
+	require.Equal(t, "upstream-gpt-compat", gjson.GetBytes(upstream.lastBody, "model").String())
+	require.Equal(t, "/v1/chat/completions", c.GetString(ContextKeyUpstreamEndpointOverride))
+	require.Contains(t, rec.Body.String(), "compat-ok")
+	require.Equal(t, 11, result.Usage.InputTokens)
+	require.Equal(t, 7, result.Usage.OutputTokens)
+	require.Equal(t, "gpt-5", result.Model)
+	require.Equal(t, "upstream-gpt-compat", result.UpstreamModel)
+}
+
+func TestBuildOpenAIChatCompletionsURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		base string
+		want string
+	}{
+		{name: "empty uses official", base: "", want: openaiPlatformChatCompletionsURL},
+		{name: "origin appends v1", base: "https://compat.example.com", want: "https://compat.example.com/v1/chat/completions"},
+		{name: "v1 base appends endpoint", base: "https://compat.example.com/v1", want: "https://compat.example.com/v1/chat/completions"},
+		{name: "existing endpoint kept", base: "https://compat.example.com/v1/chat/completions", want: "https://compat.example.com/v1/chat/completions"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, buildOpenAIChatCompletionsURL(tt.base))
+		})
+	}
 }
